@@ -15,7 +15,6 @@
 
 #include <AP_HAL/AP_HAL.h>
 
-#if CONFIG_HAL_BOARD == HAL_BOARD_LINUX
 #include "AP_InertialSensor_LSM9DS0.h"
 
 #include <utility>
@@ -382,23 +381,29 @@ AP_InertialSensor_LSM9DS0::AP_InertialSensor_LSM9DS0(AP_InertialSensor &imu,
                                                      AP_HAL::OwnPtr<AP_HAL::SPIDevice> dev_gyro,
                                                      AP_HAL::OwnPtr<AP_HAL::SPIDevice> dev_accel,
                                                      int drdy_pin_num_a,
-                                                     int drdy_pin_num_g)
+                                                     int drdy_pin_num_g,
+                                                     enum Rotation rotation)
     : AP_InertialSensor_Backend(imu)
     , _dev_gyro(std::move(dev_gyro))
     , _dev_accel(std::move(dev_accel))
     , _drdy_pin_num_a(drdy_pin_num_a)
     , _drdy_pin_num_g(drdy_pin_num_g)
+    , _rotation(rotation)
 {
-    _product_id = AP_PRODUCT_ID_NONE;
 }
 
 AP_InertialSensor_Backend *AP_InertialSensor_LSM9DS0::probe(AP_InertialSensor &_imu,
                                                             AP_HAL::OwnPtr<AP_HAL::SPIDevice> dev_gyro,
-                                                            AP_HAL::OwnPtr<AP_HAL::SPIDevice> dev_accel)
+                                                            AP_HAL::OwnPtr<AP_HAL::SPIDevice> dev_accel,
+                                                            enum Rotation rotation)
 {
+    if (!dev_gyro || !dev_accel) {
+        return nullptr;
+    }
     AP_InertialSensor_LSM9DS0 *sensor =
         new AP_InertialSensor_LSM9DS0(_imu, std::move(dev_gyro), std::move(dev_accel),
-                                      LSM9DS0_DRY_X_PIN, LSM9DS0_DRY_G_PIN);
+                                      LSM9DS0_DRY_X_PIN, LSM9DS0_DRY_G_PIN,
+                                      rotation);
     if (!sensor || !sensor->_init_sensor()) {
         delete sensor;
         return nullptr;
@@ -433,9 +438,7 @@ bool AP_InertialSensor_LSM9DS0::_init_sensor()
         _drdy_pin_g->mode(HAL_GPIO_INPUT);
     }
 
-    hal.scheduler->suspend_timer_procs();
     bool success = _hardware_init();
-    hal.scheduler->resume_timer_procs();
 
 #if LSM9DS0_DEBUG
     _dump_registers();
@@ -491,14 +494,6 @@ bool AP_InertialSensor_LSM9DS0::_hardware_init()
 
     _spi_sem->give();
 
-    _gyro_instance = _imu.register_gyro(760);
-    _accel_instance = _imu.register_accel(800);
-
-    _set_accel_max_abs_offset(_accel_instance, 5.0f);
-
-    /* start the timer process to read samples */
-    hal.scheduler->register_timer_process(FUNCTOR_BIND_MEMBER(&AP_InertialSensor_LSM9DS0::_poll_data, void));
-
     return true;
 
 fail_tries:
@@ -506,6 +501,25 @@ fail_whoami:
     _spi_sem->give();
     return false;
 }
+
+
+/*
+  start the sensor going
+ */
+void AP_InertialSensor_LSM9DS0::start(void)
+{
+    _gyro_instance = _imu.register_gyro(760, _dev_gyro->get_bus_id_devtype(DEVTYPE_GYR_L3GD20));
+    _accel_instance = _imu.register_accel(800, _dev_accel->get_bus_id_devtype(DEVTYPE_ACC_LSM303D));
+
+    set_gyro_orientation(_gyro_instance, _rotation);
+    set_accel_orientation(_accel_instance, _rotation);
+    
+    _set_accel_max_abs_offset(_accel_instance, 5.0f);
+
+    /* start the timer process to read samples */
+    _dev_gyro->register_periodic_callback(1000, FUNCTOR_BIND_MEMBER(&AP_InertialSensor_LSM9DS0::_poll_data, bool));
+}
+
 
 uint8_t AP_InertialSensor_LSM9DS0::_register_read_xm(uint8_t reg)
 {
@@ -606,7 +620,7 @@ void AP_InertialSensor_LSM9DS0::_accel_init()
     hal.scheduler->delay(1);
 
     _register_write_xm(CTRL_REG1_XM,
-                       CTRL_REG1_XM_AODR_800Hz |
+                       CTRL_REG1_XM_AODR_1600Hz |
                        CTRL_REG1_XM_BDU |
                        CTRL_REG1_XM_AZEN |
                        CTRL_REG1_XM_AYEN |
@@ -614,7 +628,7 @@ void AP_InertialSensor_LSM9DS0::_accel_init()
     hal.scheduler->delay(1);
 
     _register_write_xm(CTRL_REG2_XM,
-                       CTRL_REG2_XM_ABW_50Hz |
+                       CTRL_REG2_XM_ABW_194Hz |
                        CTRL_REG2_XM_AFS_16G);
     _set_accel_scale(A_SCALE_16G);
     hal.scheduler->delay(1);
@@ -664,35 +678,15 @@ void AP_InertialSensor_LSM9DS0::_set_accel_scale(accel_scale scale)
 /**
  * Timer process to poll for new data from the LSM9DS0.
  */
-void AP_InertialSensor_LSM9DS0::_poll_data()
+bool AP_InertialSensor_LSM9DS0::_poll_data()
 {
-    bool drdy_is_from_reg = _drdy_pin_num_a < 0 || _drdy_pin_num_g < 0;
-    bool gyro_ready;
-    bool accel_ready;
-
-    if (drdy_is_from_reg && !_spi_sem->take_nonblocking()) {
-        return;
+    if (_gyro_data_ready()) {
+        _read_data_transaction_g();
     }
-
-    gyro_ready = _gyro_data_ready();
-    accel_ready = _accel_data_ready();
-
-    if (gyro_ready || accel_ready) {
-        if (!drdy_is_from_reg && !_spi_sem->take_nonblocking()) {
-            return;
-        }
-
-        if (gyro_ready) {
-            _read_data_transaction_g();
-        }
-        if (accel_ready) {
-            _read_data_transaction_a();
-        }
-
-        _spi_sem->give();
-    } else if(drdy_is_from_reg) {
-        _spi_sem->give();
+    if (_accel_data_ready()) {
+        _read_data_transaction_a();
     }
+    return true;
 }
 
 bool AP_InertialSensor_LSM9DS0::_accel_data_ready()
@@ -797,4 +791,3 @@ void AP_InertialSensor_LSM9DS0::_dump_registers(void)
 }
 #endif
 
-#endif

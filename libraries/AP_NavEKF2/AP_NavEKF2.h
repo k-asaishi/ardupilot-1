@@ -1,4 +1,3 @@
-/// -*- tab-width: 4; Mode: C++; c-basic-offset: 4; indent-tabs-mode: nil -*-
 /*
   24 state EKF based on https://github.com/priseborough/InertialNav
   Converted from Matlab to C++ by Paul Riseborough
@@ -62,6 +61,10 @@ public:
     // return -1 if no primary core selected
     int8_t getPrimaryCoreIndex(void) const;
 
+    // returns the index of the IMU of the primary core
+    // return -1 if no primary core selected
+    int8_t getPrimaryCoreIMUIndex(void) const;
+    
     // Write the last calculated NE position relative to the reference point (m) for the specified instance.
     // An out of range instance (eg -1) returns data for the the primary instance
     // If a calculated solution is not available, use the best available data and return false
@@ -197,7 +200,8 @@ public:
     // rawGyroRates are the sensor rotation rates in rad/sec measured by the sensors internal gyro
     // The sign convention is that a RH physical rotation of the sensor about an axis produces both a positive flow and gyro rate
     // msecFlowMeas is the scheduler time in msec when the optical flow data was received from the sensor.
-    void  writeOptFlowMeas(uint8_t &rawFlowQuality, Vector2f &rawFlowRates, Vector2f &rawGyroRates, uint32_t &msecFlowMeas);
+    // posOffset is the XYZ flow sensor position in the body frame in m
+    void  writeOptFlowMeas(uint8_t &rawFlowQuality, Vector2f &rawFlowRates, Vector2f &rawGyroRates, uint32_t &msecFlowMeas, const Vector3f &posOffset);
 
     // return data for debugging optical flow fusion for the specified instance
     // An out of range instance (eg -1) returns data for the the primary instance
@@ -264,13 +268,13 @@ public:
     // this is needed to ensure the vehicle does not fly too high when using optical flow navigation
     bool getHeightControlLimit(float &height) const;
 
-    // return the amount of yaw angle change due to the last yaw angle reset in radians
+    // return the amount of yaw angle change (in radians) due to the last yaw angle reset or core selection switch
     // returns the time of the last yaw angle reset or 0 if no reset has ever occurred
-    uint32_t getLastYawResetAngle(float &yawAng) const;
+    uint32_t getLastYawResetAngle(float &yawAngDelta);
 
     // return the amount of NE position change due to the last position reset in metres
     // returns the time of the last reset or 0 if no reset has ever occurred
-    uint32_t getLastPosNorthEastReset(Vector2f &pos) const;
+    uint32_t getLastPosNorthEastReset(Vector2f &posDelta);
 
     // return the amount of NE velocity change due to the last velocity reset in metres/sec
     // returns the time of the last reset or 0 if no reset has ever occurred
@@ -336,6 +340,7 @@ private:
     AP_Int16 _yawInnovGate;         // Percentage number of standard deviations applied to magnetic yaw innovation consistency check
     AP_Int8 _tauVelPosOutput;       // Time constant of output complementary filter : csec (centi-seconds)
     AP_Int8 _useRngSwHgt;           // Maximum valid range of the range finder in metres
+    AP_Float _terrGradMax;          // Maximum terrain gradient below the vehicle
 
     // Tuning parameters
     const float gpsNEVelVarAccScale;    // Scale factor applied to NE velocity measurement variance due to manoeuvre acceleration
@@ -375,4 +380,30 @@ private:
 
     // time at start of current filter update
     uint64_t imuSampleTime_us;
+    
+    struct {
+        uint32_t last_function_call;  // last time getLastYawYawResetAngle was called
+        bool core_changed;            // true when a core change happened and hasn't been consumed, false otherwise
+        uint32_t last_primary_change; // last time a primary has changed
+        float core_delta;             // the amount of yaw change between cores when a change happened
+    } yaw_reset_data;
+
+    struct {
+        uint32_t last_function_call;  // last time getLastPosNorthEastReset was called
+        bool core_changed;            // true when a core change happened and hasn't been consumed, false otherwise
+        uint32_t last_primary_change; // last time a primary has changed
+        Vector2f core_delta;          // the amount of NE position change between cores when a change happened
+    } pos_reset_data;
+
+    // update the yaw reset data to capture changes due to a lane switch
+    // has_switched - true if the primary instance has already been changed during this filter update cycle
+    // new_primary - index of the ekf instance that we are about to switch to as the primary
+    // old_primary - index of the ekf instance that we are currently using as the primary
+    void updateLaneSwitchYawResetData(bool has_switched, uint8_t new_primary, uint8_t old_primary);
+
+    // update the position reset data to capture changes due to a lane switch
+    // has_switched - true if the primary instance has already been changed during this filter update cycle
+    // new_primary - index of the ekf instance that we are about to switch to as the primary
+    // old_primary - index of the ekf instance that we are currently using as the primary
+    void updateLaneSwitchPosResetData(bool has_switched, uint8_t new_primary, uint8_t old_primary);
 };

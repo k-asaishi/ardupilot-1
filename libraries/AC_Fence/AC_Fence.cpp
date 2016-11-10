@@ -1,4 +1,3 @@
-/// -*- tab-width: 4; Mode: C++; c-basic-offset: 4; indent-tabs-mode: nil -*-
 #include <AP_HAL/AP_HAL.h>
 #include "AC_Fence.h"
 #include <GCS_MAVLink/GCS_MAVLink.h>
@@ -12,7 +11,7 @@ const AP_Param::GroupInfo AC_Fence::var_info[] = {
     // @Description: Allows you to enable (1) or disable (0) the fence functionality
     // @Values: 0:Disabled,1:Enabled
     // @User: Standard
-    AP_GROUPINFO_FLAGS("ENABLE", 0, AC_Fence, _enabled, 0, AP_PARAM_FLAG_ENABLE),
+    AP_GROUPINFO("ENABLE",      0,  AC_Fence,   _enabled,   0),
 
     // @Param: TYPE
     // @DisplayName: Fence Type
@@ -346,7 +345,7 @@ bool AC_Fence::boundary_breached(const Vector2f& location, uint16_t num_points, 
 void AC_Fence::handle_msg(mavlink_channel_t chan, mavlink_message_t* msg)
 {
     // exit immediately if null message
-    if (msg == NULL) {
+    if (msg == nullptr) {
         return;
     }
 
@@ -406,7 +405,7 @@ bool AC_Fence::load_polygon_from_eeprom(bool force_reload)
     }
 
     // exit if we could not allocate RAM for the boundary
-    if (_boundary == NULL) {
+    if (_boundary == nullptr) {
         return false;
     }
 
